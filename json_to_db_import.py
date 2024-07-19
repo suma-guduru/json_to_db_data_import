@@ -1,119 +1,79 @@
-python
+import boto3
+import jsot boto3
 import json
 import psycopg2
-import logging
-
-# Define tht logging
-
-# Define the connection details for the Postgre database
-DB_HOST = 'your_host'
-DB_NAME = 'your_database'
-DB_USER = 'your_username'
-DB_PASSWORD = 'your_password'
-
-# Define the JSON file path
-JSON_FILE_PATH = 'path_to_your_json_file.json'
-
-# Define the Postgre dimension table name
-DIMENSION_TABLE_NAME = 'your_dimension_table_name'
-
-# Define the logging configuration
-LOGGING_CONFIG = {
-    'version': 1,
-    'formatters': {
-        'default': {
-            'format': '[%(asctime)s] %(name)s:%(levelname)s: %(message)s',
-        },
-    },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'default',
-        },
-    },
-    'root': {
-        'level': 'INFO',
-        'handlers': ['console'],
-    },
-}
-
-# Set up the logging configuration
-logging.config.dictConfig(LOGGING_CONFIG)
-
-# Define the function to load JSON data
-def load_json_data(json_file_path):
-    with open(json_file_path, 'r') as file:
-        return json.load(file)
-
-# Define the function to connect to the Postgre database
-def connect_to_database():
-    conn = psycopg2.connect(
-        host=DB_HOST,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD
+from psycopg2.extras import execute_values
+# AWS Lambda function handler
+def lambda_handler(event, context):
+    # Initialize AWS clients
+    s3 = boto3.client('s3')
+    db = psycopg2.connect(
+        dbname='your_database_name',
+        user='your_database_username',
+        password='your_database_password',
+        host='your_database_host',
+        port='your_database_port'
     )
-    return conn
-
-# Define the function to validate JSON data
-def validate_json_data(json_data):
-    # Check if the JSON data contains required fields
-    required_fields = ['field1', 'field2']
-    for field in required_fields:
-        if field not in json_data:
-            raise ValueError(f"Missing required field: {field}")
-
-    # Check if the JSON data has the correct format
-    if not isinstance(json_data['field1'], str):
-        raise ValueError("Field 'field1' must be a string")
-
-    # Add more validation rules as needed
-
-# Define the function to transform JSON data
-def transform_json_data(json_data):
-    # Transform the JSON data into a format suitable for the dimension table
-    transformed_data = {
-        'field1': json_data['field1'],
-        'field2': json_data['field2'],
-        # Add more transformation rules as needed
-    }
-    return transformed_data
-
-# Define the function to insert data into the Postgre dimension table
-def insert_data_into_dimension_table(conn, transformed_data):
-    cursor = conn.cursor()
-    cursor.execute(f"INSERT INTO {DIMENSION_TABLE_NAME} (field1, field2) VALUES (%s, %s)", (transformed_data['field1'], transformed_data['field2']))
-    conn.commit()
+    cursor = db.cursor()
+    # Retrieve JSON data from S3 bucket
+    bucket_name = 'your_s3_bucket_name'
+    file_name = 'your_file_name.json'
+    response = s3.get_object(Bucket=bucket_name, Key=file_name)
+    json_data = json.loads(response['Body'].read().decode('utf-8'))
+    # Create tables in PostgreSQL database
+    cursor.execute('''
+        CREATE SCHEMA IF NOT EXISTS plants;
+        CREATE TABLE IF NOT EXISTS plants.plants (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS plants.inverters (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS plants.batteries (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS plants.plant_inverters (
+            plant_id INTEGER NOT NULL,
+            inverter_id INTEGER NOT NULL,
+            PRIMARY KEY (plant_id, inverter_id),
+            FOREIGN KEY (plant_id) REFERENCES plants.plants (id),
+            FOREIGN KEY (inverter_id) REFERENCES plants.inverters (id)
+        );
+        CREATE TABLE IF NOT EXISTS plants.inverter_batteries (
+            inverter_id INTEGER NOT NULL,
+            battery_id INTEGER NOT NULL,
+            PRIMARY KEY (inverter_id, battery_id),
+            FOREIGN KEY (inverter_id) REFERENCES plants.inverters (id),
+            FOREIGN KEY (battery_id) REFERENCES plants.batteries (id)
+        );
+    ''')
+    # Insert data into tables
+    plants = []
+    inverters = []
+    batteries = []
+    for plant in json_data['plants']:
+        plants.append((plant['id'], plant['name']))
+        for inverter in plant['inverters']:
+            inverters.append((inverter['id'], inverter['name']))
+            for battery in inverter['batteries']:
+                batteries.append((battery['id'], battery['name']))
+    execute_values(cursor, 'INSERT INTO plants.plants (id, name) VALUES %s', plants)
+    execute_values(cursor, 'INSERT INTO plants.inverters (id, name) VALUES %s', inverters)
+    execute_values(cursor, 'INSERT INTO plants.batteries (id, name) VALUES %s', batteries)
+    for plant in json_data['plants']:
+        for inverter in plant['inverters']:
+            for battery in inverter['batteries']:
+                execute_values(cursor, 'INSERT INTO plants.plant_inverters (plant_id, inverter_id) VALUES %s', [(plant['id'], inverter['id'])])
+                execute_values(cursor, 'INSERT INTO plants.inverter_batteries (inverter_id, battery_id) VALUES %s', [(inverter['id'], battery['id'])])
+    # Commit changes and close the database connection
+    db.commit()
     cursor.close()
-
-# Define the function to log errors or exceptions
-def log_error(error):
-    logging.error(error)
-
-# Main function
-def main():
-    try:
-        # Load the JSON data
-        json_data = load_json_data(JSON_FILE_PATH)
-
-        # Connect to the Postgre database
-        conn = connect_to_database()
-
-        # Validate the JSON data
-        validate_json_data(json_data)
-
-        # Transform the JSON data
-        transformed_data = transform_json_data(json_data)
-
-        # Insert the transformed data into the Postgre dimension table
-        insert_data_into_dimension_table(conn, transformed_data)
-
-        # Close the database connection
-        conn.close()
-
-    except Exception as e:
-        # Log any errors or exceptions
-        log_error(str(e))
-
-if __name__ == '__main__':
-    main()
+    db.close()
+    # Return a success response
+    return {
+        'statusCode': 200,
+        'statusMessage': 'JSON data imported successfully'
+    }
